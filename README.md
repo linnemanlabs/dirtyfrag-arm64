@@ -4,7 +4,7 @@ arm64/aarch64 port of [V4bel/dirtyfrag](https://github.com/V4bel/dirtyfrag) (CVE
 
 Tested on Ubuntu 24.04.4 LTS with `linux-aws 6.17.0-1013-aws` on AWS Graviton (newest available as of this writing).
 
-> **Full writeup with Tetragon detection policies, AppArmor hardening analysis, YARA rules, and a mitigation comparison matrix:** [https://linnemanlabs.com/dirtyfrag-arm64](https://linnemanlabs.com/dirtyfrag-arm64) *(coming soon)*
+> **Full writeup with AppArmor bypass analysis, hardening notes, and detection notes:** [linnemanlabs.com/posts/porting-dirtyfrag-arm64](https://linnemanlabs.com/posts/porting-dirtyfrag-arm64/)
 
 ## What's different on arm64
 
@@ -23,13 +23,23 @@ lr : skcipher_walk_done+0xbc/0x260
      rxrpc_send_data+0x264/0x550 [rxrpc]
 ```
 
-On arm64 systems where unprivileged user namespace creation is blocked, neither exploit path should work. The ESP path can't create the required network namespace, and the rxrpc fallback panics the kernel. On x86\_64 the rxrpc path provides a namespace-free alternative.
+On the arm64 systems I tested, denying the `uid_map` write removed the working ESP path. The namespace may still be created, but the process cannot map itself to root inside it or gain the namespaced capabilities needed for XFRM setup. The rxrpc fallback did not provide a working namespace-free privilege-escalation path on arm64, it oopsed the kernel instead.
 
 ### ESP-only operation
 
-On arm64, only the ESP path is viable. This path requires unprivileged user namespace creation (`unshare -U -n`), which is enabled by default on most Linux distributions and cloud images. Distributions have ways to restrict it like Ubuntu via AppArmor profiles, Debian via `kernel.unprivileged_userns_clone`, RHEL via `user.max_user_namespaces` can block the ESP path if configured properly.
+On arm64, only the ESP path was viable in my testing. This path requires creating a user and network namespace and then successfully mapping the calling user to root inside that namespace. Distro hardening can break that path in different ways: Ubuntu can deny the `uid_map` write through AppArmor userns restrictions, I have not tested on Debian/RHEL.
 
-On x86_64, the rxrpc path provides a fallback that works without namespaces. On arm64, no such fallback exists: blocking unprivileged user namespaces makes the system unexploitable by either path.
+### AppArmor: blocked by default, bypassable on stock Ubuntu 24.04 AWS image
+
+On the Ubuntu 24.04 AWS image I tested, `apparmor_restrict_unprivileged_userns=1` blocked direct exploitation from my normal SSH shell by denying the `uid_map` write inside the new namespace.
+
+However, with the default `apparmor_restrict_unprivileged_unconfined=0`, an unconfined user can transition into an existing complain-mode profile (e.g. `runc`) via `aa-exec` and bypass the restriction:
+
+```bash
+aa-exec -p runc -- ./dirtyfrag_arm64 --force-esp
+```
+
+Setting `kernel.apparmor_restrict_unprivileged_unconfined=1` blocks this path. See the [full writeup](https://linnemanlabs.com/posts/porting-dirtyfrag-arm64/) for details including SSM-specific findings.
 
 ### Architecture-specific payload
 
@@ -84,13 +94,25 @@ install esp6 /bin/false
 install rxrpc /bin/false
 ```
 
+### Remove read permissions from SUID binaries
+
+Blocks this splice-based page-cache attack class against those SUID binary targets. The exploit needs read permissions to the target file for `splice()`. Users can still execute the binaries.
+
+**Do not implement this without testing it in your environment and across all of your tooling.**
+
+```bash
+chmod o-r /usr/bin/su
+```
+
+This is not a fix, only a mitigation. There are many more paths to privilege escalation.
+
 ### Unload the modules
 
 To unload the modules from the running system:
 
 ```bash
-rmmod esp4 esp6 rxrpc 2>/dev/null
-````
+rmmod esp4 esp6 ipcomp4 ipcomp6 rxrpc 2>/dev/null
+```
 
 ### Flush page cache
 
@@ -99,9 +121,12 @@ Flushing the page cache should remove the malicious contents and cause the files
 ```bash
 echo 3 > /proc/sys/vm/drop_caches
 ```
+
 Note: I have had some inconsistent results with this, but the more I try to reproduce it the more it's working as expected. For this PoC, you can check the md5sum on /usr/bin/su, and if it doesn't match, reboot.
 
-### Verify after mitigation
+### Cleaning up after testing
+
+Run the flush page cache step. Verify after 
 
 ```bash
 sha256sum /usr/bin/su
@@ -118,8 +143,8 @@ For a more proactive posture that addresses this entire vulnerability class (not
 
 ## Credits
 
-- [Hyunwoo Kim (@v4bel)](https://github.com/V4bel) - original vulnerability research, disclosure, and x86\_64 PoC. aka all of the real work
-- [Keith Linneman / LinnemanLabs](https://linnemanlabs.com) - arm64 port, `flush_dcache_page` crash analysis, and detection rules
+- [Hyunwoo Kim (@v4bel)](https://github.com/V4bel) - original vulnerability research, disclosure, and x86\_64 PoC
+- [Keith Linneman / LinnemanLabs](https://linnemanlabs.com) - arm64 port, `flush_dcache_page` crash analysis, AppArmor research, and detection notes
 
 ## Legal
 
