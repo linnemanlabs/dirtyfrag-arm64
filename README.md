@@ -6,9 +6,7 @@ Tested on Ubuntu 24.04.4 LTS with `linux-aws 6.17.0-1013-aws` on AWS Graviton (n
 
 > **Full writeup with AppArmor bypass analysis, hardening notes, and detection notes:** [linnemanlabs.com/posts/porting-dirtyfrag-arm64](https://linnemanlabs.com/posts/porting-dirtyfrag-arm64/)
 
-## Ubuntu AppArmor userns restrictions do not reliably prevent this exploit
-
-## Ubuntu AppArmor userns restrictions do not reliably prevent this exploit
+## ⚠️ Ubuntu AppArmor userns restrictions do not reliably prevent this exploit 
 
 Ubuntu has two AppArmor sysctls:
 - kernel.apparmor_restrict_unprivileged_userns
