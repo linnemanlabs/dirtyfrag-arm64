@@ -6,6 +6,22 @@ Tested on Ubuntu 24.04.4 LTS with `linux-aws 6.17.0-1013-aws` on AWS Graviton (n
 
 > **Full writeup with AppArmor bypass analysis, hardening notes, and detection notes:** [linnemanlabs.com/posts/porting-dirtyfrag-arm64](https://linnemanlabs.com/posts/porting-dirtyfrag-arm64/)
 
+## Ubuntu AppArmor userns restrictions do not reliably prevent this exploit
+
+## Ubuntu AppArmor userns restrictions do not reliably prevent this exploit
+
+Ubuntu has two AppArmor sysctls:
+- kernel.apparmor_restrict_unprivileged_userns
+- kernel.apparmor_restrict_unprivileged_unconfined
+
+Both can be bypassed by chaining `aa-exec` with itself using profiles present on the standard Ubuntu cloud and installer images I tested:
+
+```
+aa-exec -p crun -- aa-exec -p crun -- ./dirtyfrag_arm64 --force-esp
+```
+
+For more info see [Two Hops and a Shell](https://linnemanlabs.com/posts/two-hops-and-a-shell/) for the full analysis of the Ubuntu AppArmor bypass.
+
 ## What's different on arm64
 
 The upstream x86\_64 PoC uses two exploit paths: an ESP/xfrm path that corrupts `/usr/bin/su`, and an rxrpc/rxkad fallback that corrupts `/etc/passwd`. On arm64 the rxrpc path kernel-oopses and cannot be used. The ESP path works cleanly.
@@ -29,7 +45,7 @@ On the arm64 systems I tested, denying the `uid_map` write removed the working E
 
 On arm64, only the ESP path was viable in my testing. This path requires creating a user and network namespace and then successfully mapping the calling user to root inside that namespace. Distro hardening can break that path in different ways: Ubuntu can deny the `uid_map` write through AppArmor userns restrictions, I have not tested on Debian/RHEL.
 
-### AppArmor: blocked by default, bypassable on stock Ubuntu 24.04 AWS image
+### AppArmor: blocked by default, bypassable on Ubuntu
 
 On the Ubuntu 24.04 AWS image I tested, `apparmor_restrict_unprivileged_userns=1` blocked direct exploitation from my normal SSH shell by denying the `uid_map` write inside the new namespace.
 
@@ -38,8 +54,13 @@ However, with the default `apparmor_restrict_unprivileged_unconfined=0`, an unco
 ```bash
 aa-exec -p runc -- ./dirtyfrag_arm64 --force-esp
 ```
+Setting `kernel.apparmor_restrict_unprivileged_unconfined=1` blocks this path, and is widely recommended currently as a solution to block all paths. However, adding another aa-exec bypasses that also:
 
-Setting `kernel.apparmor_restrict_unprivileged_unconfined=1` blocks this path. See the [full writeup](https://linnemanlabs.com/posts/porting-dirtyfrag-arm64/) for details including SSM-specific findings.
+```
+aa-exec -p crun -- aa-exec -p crun -- ./dirtyfrag_arm64 --force-esp
+```
+
+See the earlier linked posts for details.
 
 ### Architecture-specific payload
 
@@ -85,7 +106,7 @@ As of 2026-05-09, the latest available Ubuntu 24.04 aws kernel (`6.17.0-1013-aws
 
 Blacklist the vulnerable modules, apply appropriate system hardening for your distro.
 
-### Blacklist the modules
+### Blacklist the vulnerable modules
 Safe on any system not actively using IPsec transport mode or AFS. To prevent loading of the modules put the following into `/etc/modprobe.d/dirtyfrag.conf`:
 
 ```
@@ -93,6 +114,14 @@ install esp4 /bin/false
 install esp6 /bin/false
 install rxrpc /bin/false
 ```
+
+### Update initramfs
+
+Ubuntu also recommends regenerating initramfs so the blacklist is present during early boot:
+
+```bash
+update-initramfs -u -k all
+``
 
 ### Remove read permissions from SUID binaries
 
@@ -114,6 +143,14 @@ To unload the modules from the running system:
 rmmod esp4 esp6 ipcomp4 ipcomp6 rxrpc 2>/dev/null
 ```
 
+Ensure they are unloaded:
+
+```bash
+grep -qE '^(esp4|esp6|rxrpc) ' /proc/modules \
+  && echo "Affected modules are loaded" \
+  || echo "Affected modules are NOT loaded"
+```
+
 ### Flush page cache
 
 Flushing the page cache should remove the malicious contents and cause the files to be read from disk again.
@@ -126,7 +163,7 @@ Note: I have had some inconsistent results with this, but the more I try to repr
 
 ### Cleaning up after testing
 
-Run the flush page cache step. Verify after 
+Run the flush page cache step, then verify after with:
 
 ```bash
 sha256sum /usr/bin/su
@@ -144,7 +181,8 @@ For a more proactive posture that addresses this entire vulnerability class (not
 ## Credits
 
 - [Hyunwoo Kim (@v4bel)](https://github.com/V4bel) - original vulnerability research, disclosure, and x86\_64 PoC
-- [Keith Linneman / LinnemanLabs](https://linnemanlabs.com) - arm64 port, `flush_dcache_page` crash analysis, AppArmor research, and detection notes
+- [SiCk](https://afflicted.sh) - bypass-pwn research on Ubuntu AppArmor bypass
+- [Keith Linneman / LinnemanLabs](https://linnemanlabs.com) - arm64 port, `flush_dcache_page` crash analysis, AppArmor research, detection notes
 
 ## Legal
 
